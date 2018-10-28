@@ -63,7 +63,11 @@ def run_external(text, speak_args):
     cmd = ['say', '-r', str(speak_args.speed)]
     popen = subprocess.Popen(cmd, stdin=subprocess.PIPE, universal_newlines=True)
     popen.communicate(text)
-    if popen.returncode not in (0, signal.SIGINT):
+    if popen.returncode == - signal.SIGINT:
+        if DEBUG:
+            print('run_external: received SIGINT', file=sys.stderr)
+        raise KeyboardInterrupt('External process received SIGINT')
+    elif popen.returncode != 0:
         raise subprocess.CalledProcessError(returncode=popen.returncode, cmd=cmd)
 
 
@@ -76,6 +80,10 @@ class WordBuffer(object):
         self.lock = threading.Lock()
         self.available = threading.Event()
         self.closed = False  # closed: whether bufferis closed for writing
+
+    def is_closed(self):
+        with self.lock:
+            return self.closed
 
     def close(self, clear):
         with self.lock:
@@ -137,11 +145,16 @@ def keyboard_to_word_buffer(word_buffer):
         while keep_going:
             ch = Console.getch()
 
-            if ch.isalnum() or ch in '.,;!?\'\"':
-                chars.append(ch)
-            elif ch in ('', EOF_CHARCODE):
+            if ch in ('', EOF_CHARCODE):
                 word_buffer.close(False)
                 keep_going = False
+            elif word_buffer.is_closed():
+                keep_going = False
+                print('\nkeyboard_to_word_buffer: speaker program received interrupt but keyboard did not.',
+                    end='', file=sys.stderr)
+                continue
+            elif ch.isalnum() or ch in '.,;!?\'\"':
+                chars.append(ch)
             elif ch == BKSP_CHARCODE:
                 if chars:
                     chars.pop()
@@ -150,7 +163,12 @@ def keyboard_to_word_buffer(word_buffer):
             elif chars:
                 word = ''.join(chars)
                 chars[:] = []
-                word_buffer.add(word)
+                try:
+                    word_buffer.add(word)
+                except WordBuffer.ClosedError:
+                    print('\nkeyboard_to_word_buffer: add failed because word_buffer was closed.',
+                        end='', file=sys.stderr)
+                    continue
 
             if ch not in ('', EOF_CHARCODE, BKSP_CHARCODE):
                 print(ch, end='')
