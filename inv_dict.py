@@ -3,6 +3,10 @@
 """
 This is an inverse-dictation program.
 It speaks out word-by-word whatever you type.
+
+You can optionally specify how to make it speak using command-line arguments.
+The command-line arguments will be executed and
+the text that you type will be passed into its stdin.
 """
 
 from __future__ import print_function, unicode_literals, division
@@ -15,7 +19,30 @@ import threading
 import signal
 
 DEBUG = False
+PY3 = sys.version_info.major >= 3
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+PROG_NAME = os.path.basename(os.path.abspath(__file__))
+
+
+printed_newline = False
+printed_newline_lock = threading.Lock()
+
+def print_debug(*args, **kwargs):
+    debug_only = kwargs.get('debug_only', True)  # python 2 workaround for https://www.python.org/dev/peps/pep-3102/#specification
+    if DEBUG or not debug_only:
+        with printed_newline_lock:
+            global printed_newline
+            if not printed_newline:
+                print()
+                sys.stdout.flush()
+                printed_newline = True
+        l = []
+        for arg in args:
+            if isinstance(arg, BaseException):
+                l.append(type(arg).__name__ + ': ' + str(arg))
+            else:
+                l.append(str(arg))
+        print(': '.join(l), file=sys.stderr)
 
 
 class Console(object):
@@ -46,29 +73,29 @@ class Console(object):
 
     @staticmethod
     def reset():
-        if DEBUG:
-            print('Resetting console', file=sys.stderr)
+        print_debug('Console: resetting')
         if Console.isatty and Console.is_unix:
             import termios
             termios.tcsetattr(Console.fd, termios.TCSANOW, Console.oldattr)
 
 
-class SpeakArgs(object):
-    DEFAULT_SPEED = 100
-    def __init__(self, speed):
-        self.speed = speed if speed is not None else SpeakArgs.DEFAULT_SPEED
+class StopExternal(Exception): pass
 
 
 def run_external(text, speak_args):
-    cmd = ['say', '-r', str(speak_args.speed)]
-    popen = subprocess.Popen(cmd, stdin=subprocess.PIPE, universal_newlines=True)
+    try:
+        popen = subprocess.Popen(speak_args, stdin=subprocess.PIPE, universal_newlines=True)
+    except OSError as e:
+        print_debug(e, debug_only=False)
+        if not (PY3 and isinstance(e, FileNotFoundError)):
+            print_debug(PROG_NAME, 'Looks like your command-line arguments are incorrect.', debug_only=False)
+        raise StopExternal('run_external: OSError')
+
     popen.communicate(text)
     if popen.returncode == - signal.SIGINT:
-        if DEBUG:
-            print('run_external: received SIGINT', file=sys.stderr)
-        raise KeyboardInterrupt('External process received SIGINT')
+        raise StopExternal('run_external: received SIGINT')
     elif popen.returncode != 0:
-        raise subprocess.CalledProcessError(returncode=popen.returncode, cmd=cmd)
+        raise subprocess.CalledProcessError(returncode=popen.returncode, cmd=speak_args)
 
 
 class WordBuffer(object):
@@ -95,7 +122,7 @@ class WordBuffer(object):
     def add(self, word):
         with self.lock:
             if self.closed:
-                raise WordBuffer.ClosedError()
+                raise WordBuffer.ClosedError('add failed because WordBuffer was closed.')
             else:
                 self.wordlist.append(word)
                 self.available.set()
@@ -116,6 +143,7 @@ class WordBuffer(object):
 
 
 def word_buffer_to_sound(word_buffer, speak_args):
+    func_name = 'word_buffer_to_sound'
     try:
         while True:
             wordlist = word_buffer.extract_all()
@@ -124,14 +152,10 @@ def word_buffer_to_sound(word_buffer, speak_args):
             elif wordlist:
                 sentence = ' '.join(wordlist)
                 run_external(sentence, speak_args)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, StopExternal, subprocess.CalledProcessError)  as e:
         word_buffer.close(True)
-    except subprocess.CalledProcessError as e:
-        word_buffer.close(True)
-        if e.returncode != - signal.SIGINT:
-            raise
-    if DEBUG:
-        print('word_buffer_to_sound: exited', file=sys.stderr)
+        print_debug(func_name, e, debug_only=not isinstance(e, subprocess.CalledProcessError))
+    print_debug(func_name, 'exited')
 
 
 EOF_CHARCODE = '\x04'
@@ -139,6 +163,7 @@ BKSP_CHARCODE = '\x7f'
 
 
 def keyboard_to_word_buffer(word_buffer):
+    func_name = 'keyboard_to_word_buffer'
     chars = []
     keep_going = True
     try:
@@ -150,8 +175,7 @@ def keyboard_to_word_buffer(word_buffer):
                 keep_going = False
             elif word_buffer.is_closed():
                 keep_going = False
-                print('\nkeyboard_to_word_buffer: speaker program received interrupt but keyboard did not.',
-                    end='', file=sys.stderr)
+                print_debug(func_name, 'speaker thread ended but keyboard thread did not.', debug_only=False)
                 continue
             elif ch.isalnum() or ch in '.,;!?\'\"':
                 chars.append(ch)
@@ -165,18 +189,17 @@ def keyboard_to_word_buffer(word_buffer):
                 chars[:] = []
                 try:
                     word_buffer.add(word)
-                except WordBuffer.ClosedError:
-                    print('\nkeyboard_to_word_buffer: add failed because word_buffer was closed.',
-                        end='', file=sys.stderr)
+                except WordBuffer.ClosedError as e:
+                    print_debug(func_name, e, debug_only=False)
                     continue
 
             if ch not in ('', EOF_CHARCODE, BKSP_CHARCODE):
                 print(ch, end='')
                 sys.stdout.flush()
-    except KeyboardInterrupt:
+    except KeyboardInterrupt as e:
         word_buffer.close(True)
-        if DEBUG:
-            print('keyboard_to_word_buffer: interrupted', file=sys.stderr)
+        print_debug(func_name, e)
+    print_debug(func_name, 'exited')
 
 
 def inverse_dictation(speak_args):
@@ -188,22 +211,28 @@ def inverse_dictation(speak_args):
         Console.init()
         keyboard_to_word_buffer(word_buffer)
     finally:
-        print()
+        if not printed_newline:
+            print()
         Console.reset()
-    if DEBUG:
-        print('inverse_dictation: exited', file=sys.stderr)
 
+
+def get_default_args():
+    return ['say', '-r', '100']
+
+
+USAGE = '%(prog)s [--debug] [--help | args]'
 
 def main():
     global DEBUG
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('-s', '--speed', type=int, help='Speed in words per minute')
-    parser.add_argument('-d', '--debug', action='store_true', default=False)
-    args = parser.parse_args()
+    parser = argparse.ArgumentParser(add_help=False, usage=USAGE, description=__doc__)
+    parser.add_argument('--help', action='help', help='show a help message and exit')
+    parser.add_argument('--debug', action='store_true', default=False, help='print debugging info')
+    prog_args, speak_args = parser.parse_known_args()
 
-    speak_args = SpeakArgs(args.speed)
-    if args.debug:
+    if prog_args.debug:
         DEBUG = True
+    if not speak_args:
+        speak_args = get_default_args()
 
     inverse_dictation(speak_args)
 
