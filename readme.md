@@ -2,18 +2,20 @@
 
 Inverse Dictator is a program which speaks what you type, word-by-word.
 
-### How to use it
-
-    python inv_dict.py
-
-See `python inv_dict.py --help` for more info.
-
 ### Prerequisites
 
 The following programs must be installed:
 
 * `python` (version 2 or 3)
-* `say`
+* `say`, `espeak`, `spd-say` or a similar text-to-speech program.
+
+### Usage examples
+
+* `python inv_dict.py say`: run using `say`.
+* `python inv_dict.py espeak`: run using `espeak`.
+* `python inv_dict.py say -r 100` run using `say` with a speaking speed of 100 words per minute.
+  All flags to the inverse dictator (except `--help` and `--debug`) are passed to the text-to-speech program.
+* `python inv_dict.py --help` prints out usage info.
 
 ### How it works
 
